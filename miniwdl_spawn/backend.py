@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -23,7 +24,7 @@ from WDL import Value
 from WDL.runtime import config
 from WDL.runtime.task_container import TaskContainer
 
-from . import completion, launch, sizing, staging
+from . import completion, launch, sizing, staging, transfer
 
 logger = logging.getLogger("miniwdl-spawn")
 
@@ -92,10 +93,12 @@ class SpawnContainer(TaskContainer):
 
     def _resolve_instance_type(self) -> str:
         rv = self.runtime_values
+        # miniwdl's base process_runtime stores runtime.cpu as "cpu" (int) and
+        # runtime.memory as "memory_reservation" (bytes) — NOT "memory".
         return sizing.pick_instance_type(
             override=rv.get("spawn_instance_type"),
             cpu=rv.get("cpu"),
-            memory=rv.get("memory"),
+            memory=rv.get("memory_reservation"),
             architecture=rv.get("spawn_architecture"),
         )
 
@@ -103,42 +106,56 @@ class SpawnContainer(TaskContainer):
     def _run(
         self, logger: logging.Logger, terminating: Callable[[], bool], command: str
     ) -> int:
-        """Dispatch the task to a spawned instance; return its exit status.
+        """Run the task on an ephemeral EC2 instance; return its exit status.
 
-        NOTE (Phase 3): the S3 workdir bridge — mapping this task's miniwdl
-        host_dir to ``_workdir_s3_base/<run_id>`` and round-tripping inputs/outputs
-        — is wired here. Requires ``SPAWN_WORKDIR_S3`` (or [spawn] workdir_s3).
+        The S3 workdir bridge: stage the command + local ``work/`` tree up to S3,
+        launch an instance that reconstructs the miniwdl container tree and runs
+        the task, then pull ``work/`` + stdout/stderr back into the local host_dir
+        so miniwdl can collect outputs as usual. Requires ``SPAWN_WORKDIR_S3``
+        (or ``[spawn] workdir_s3``).
         """
         if not self._workdir_s3_base:
             raise RuntimeError(
                 "miniwdl-spawn: no S3 workdir configured. Set SPAWN_WORKDIR_S3 "
                 "(or [spawn] workdir_s3) to an s3:// prefix the run can read/write."
             )
+        if shutil.which("aws") is None:
+            raise RuntimeError("miniwdl-spawn: the `aws` CLI is required on PATH for S3 staging.")
 
         rv = self.runtime_values
         region = rv.get("spawn_region") or self._region
         name = f"wdl-{self.run_id}".replace("_", "-")[:60]
-        workdir_s3 = f"{self._workdir_s3_base.rstrip('/')}/{self.run_id}"
+        s3_prefix = transfer.task_s3_prefix(self._workdir_s3_base, self.run_id, self.try_counter)
 
-        script = staging.build_staging_script(
-            workdir_s3=workdir_s3,
-            region=region,
-            command=command,
-            docker_image=str(rv.get("docker", "")),
+        # 1. Ensure inputs are inside the local work/ tree, then write the command
+        #    file (env exports + command) into host_dir — both are then uploaded.
+        if self.input_path_map:
+            self.copy_input_files(logger)
+        command_file = os.path.join(self.host_dir, "command")
+        with open(command_file, "w") as f:
+            f.write(transfer.build_command_file_contents(command, rv.get("env", {})))
+
+        # 2. Stage command + work/ up to S3.
+        self._run_argv(transfer.build_upload_command_argv(command_file, s3_prefix, region), check=True)
+        self._run_argv(
+            transfer.build_upload_work_argv(self.host_work_dir(), s3_prefix, region), check=True
         )
 
+        # 3. Build the per-task staging script + launch.
+        script = staging.build_staging_script(
+            workdir_s3=s3_prefix, region=region, docker_image=str(rv.get("docker", ""))
+        )
         spec = launch.LaunchSpec(
             name=name,
             instance_type=self._resolve_instance_type(),
             region=region,
-            user_data_file="",  # set below to the temp file path
+            user_data_file="",  # set below
             ttl=str(rv.get("spawn_ttl") or self._ttl),
             spot=bool(rv.get("spawn_spot", False)),
             ami=str(rv.get("spawn_ami", "")),
             az=str(rv.get("spawn_az", "")),
             fsx_id=str(rv.get("spawn_fsx", "")),
         )
-
         with tempfile.NamedTemporaryFile(
             "w", suffix=".sh", prefix=f"miniwdl-spawn-{name}-", delete=False
         ) as fh:
@@ -146,19 +163,22 @@ class SpawnContainer(TaskContainer):
             spec.user_data_file = fh.name
 
         try:
-            argv = launch.build_launch_argv(spec)
             logger.info("miniwdl-spawn: launching %s (%s)", name, spec.instance_type)
-            subprocess.run(argv, check=True, capture_output=True, text=True)
+            self._run_argv(launch.build_launch_argv(spec), check=True)
 
-            probe = completion.build_exitcode_probe_argv(workdir_s3, region)
+            # 4. Poll the durable .exitcode object; pull results on completion.
+            probe = completion.build_exitcode_probe_argv(s3_prefix, region)
             while True:
                 if terminating():
                     self._cancel(name, region)
                     return 130
-                out = subprocess.run(probe, capture_output=True, text=True)
+                out = self._run_argv(probe, check=False)
                 if out.returncode == 0:
                     code = completion.parse_exit_code(out.stdout)
                     if code is not None:
+                        # Pull results for BOTH success and failure — miniwdl reads
+                        # stdout/stderr/work even to build a CommandFailed.
+                        self._pull_results(s3_prefix, region, logger)
                         return code
                 time.sleep(self._poll_interval)
         finally:
@@ -167,8 +187,17 @@ class SpawnContainer(TaskContainer):
             except OSError:
                 pass
 
+    def _pull_results(self, s3_prefix: str, region: str, logger: logging.Logger) -> None:
+        for argv in transfer.build_download_results_argv(
+            s3_prefix, self.host_work_dir(), self.host_stdout_txt(), self.host_stderr_txt(), region
+        ):
+            self._run_argv(argv, check=False)
+
+    def _run_argv(self, argv, check):
+        return subprocess.run(argv, check=check, capture_output=True, text=True)
+
     def _cancel(self, name: str, region: str) -> None:
         try:
-            subprocess.run(launch.build_cancel_argv(name, region), capture_output=True, text=True)
+            self._run_argv(launch.build_cancel_argv(name, region), check=False)
         except Exception as e:  # best-effort
             logger.warning("miniwdl-spawn: cancel of %s failed: %s", name, e)

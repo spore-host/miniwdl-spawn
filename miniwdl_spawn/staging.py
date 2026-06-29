@@ -1,19 +1,29 @@
 """Build the per-task staging script that runs on the ephemeral instance.
 
-Ported from nf-spawn's buildStagingScript. The script is passed to
-``spawn launch --user-data-file`` and, on the instance:
+The script is passed to ``spawn launch --user-data-file`` and reconstructs
+miniwdl's exact container tree so the command's hard-coded container paths
+resolve. On the instance it:
 
-  1. syncs the task's S3 workdir down to a local dir (on the EBS root, NOT /tmp
-     which is tmpfs/RAM on AL2023),
-  2. localizes declared inputs (S3 copy, or symlink an attached-volume mount),
-  3. runs the WDL command (inside Docker when the task has a container image,
-     bind-mounting the workdir at the same path so relative paths resolve),
-  4. captures the real exit code,
-  5. syncs outputs back, then uploads ``.exitcode`` *last* (so its presence in
-     S3 always trails the outputs — the completion signal),
-  6. signals spored so the instance terminates.
+  1. recreates ``/mnt/miniwdl_task_container/{command,work/}`` (NOT under /tmp,
+     which is tmpfs/RAM on AL2023), world-writable so a non-root container user
+     can write outputs;
+  2. downloads ``command`` and the whole ``work/`` tree (inputs included, at
+     ``work/_miniwdl_inputs/...``) from S3;
+  3. runs the command EXACTLY as miniwdl's local backend does — cwd = ``work``,
+     ``/bin/bash ../command >> ../stdout.txt 2>> ../stderr.txt`` — bare, or inside
+     the WDL ``runtime.docker`` image bind-mounting the container dir at the same
+     path so ``../command`` resolves identically;
+  4. captures the real exit code, syncs ``work/`` + ``stdout.txt`` + ``stderr.txt``
+     back, then uploads ``.exitcode`` *last* (so its presence in S3 always trails
+     the outputs — the durable completion signal);
+  5. signals spored so the instance self-terminates.
 
-All functions here are pure string builders (no I/O), unit-tested without AWS.
+All functions are pure string builders (no I/O), unit-tested without AWS.
+
+NOTE: ``build_input_staging`` / ``normalize_s3_uri`` are retained for a future
+zero-copy reference-data path (attached EBS volumes / shared FSx, mirroring
+nf-spawn ``ext.volumes``/``ext.fsx``); the core bridge does not use them today —
+inputs arrive via the ``work/`` sync.
 """
 
 from __future__ import annotations
@@ -21,11 +31,13 @@ from __future__ import annotations
 import shlex
 from typing import Mapping, Optional
 
-LOCAL_DIR = "/var/lib/miniwdl-spawn-work"
+# Must match miniwdl's TaskContainer.container_dir so the command's absolute
+# container paths (/mnt/miniwdl_task_container/work/...) resolve on the instance,
+# whether the task runs bare or inside Docker.
+CONTAINER_DIR = "/mnt/miniwdl_task_container"
 
 
 def _q(s: str) -> str:
-    """POSIX-shell quote."""
     return shlex.quote(s)
 
 
@@ -36,112 +48,98 @@ def normalize_s3_uri(uri: str) -> str:
     return uri
 
 
+def build_run_line(docker_image: str, run_options: str = "") -> str:
+    """Run the command the way miniwdl's cli_subprocess does: cwd = work,
+    ``/bin/bash ../command`` with append-redirection to ../stdout.txt/../stderr.txt.
+    Bare when no image, else inside Docker bind-mounting CONTAINER_DIR at the same
+    path (so ``../command`` resolves to /mnt/miniwdl_task_container/command)."""
+    redir = "/bin/bash ../command >> ../stdout.txt 2>> ../stderr.txt"
+    if not docker_image.strip():
+        return f'( cd "${{CD}}/work" && {redir} )\n'
+    opts = (run_options.strip() + " ") if run_options.strip() else ""
+    return (
+        'docker run --rm -v "${CD}":"${CD}" -w "${CD}/work" '
+        + opts
+        + f"{_q(docker_image.strip())} /bin/bash -c {_q(redir)}\n"
+    )
+
+
 def build_input_staging(
     inputs: Mapping[str, str], mount_basenames: Optional[Mapping[str, str]] = None
 ) -> str:
-    """Localize each declared input (stage_name -> source URI) into LOCAL_DIR.
-
-    Three cases (mirroring nf-spawn): (a) an attached-volume mount whose basename
-    matches the stage name -> symlink (zero-copy); (b) a local/file:// path ->
-    symlink; (c) an s3:// source -> ``aws s3 cp``. Pure.
-    """
+    """[Deferred/optional] Zero-copy reference-data localization (attached volume
+    symlink) / S3 copy, for a future FSx/volumes path. Unused by the core bridge."""
     if not inputs:
         return ""
     mount_basenames = mount_basenames or {}
-    lines = ["# Localize declared inputs by source URI.\n"]
+    out = ["# (optional) reference-data localization\n"]
     for stage_name, source in inputs.items():
-        dest = f'"${{LOCAL_DIR}}/"{_q(stage_name)}'
-        parent = stage_name.rsplit("/", 1)[0] if "/" in stage_name else ""
-        mkparent = f'mkdir -p "${{LOCAL_DIR}}/"{_q(parent)}\n' if parent else ""
-
+        dest = f'"${{CD}}/work/"{_q(stage_name)}'
         base = stage_name.rsplit("/", 1)[-1]
         mount = mount_basenames.get(base)
-        if mount:  # (a) zero-copy symlink to an attached volume
-            lines.append(mkparent)
-            lines.append(
-                f"if [ -e {_q(mount)} ]; then ln -sfn {_q(mount)} {dest}; "
-                f'else echo "miniwdl-spawn: mount {mount} missing" >&2; exit 1; fi\n'
-            )
+        if mount:
+            out.append(f"ln -sfn {_q(mount)} {dest}\n")
             continue
-
         uri = normalize_s3_uri(source)
-        if not uri.startswith("s3://"):  # (b) local path -> symlink
-            local = uri[len("file://") :] if uri.startswith("file://") else uri
-            if local.startswith("/"):
-                lines.append(mkparent)
-                lines.append(f"if [ -e {_q(local)} ]; then ln -sfn {_q(local)} {dest}; fi\n")
-            continue
-
-        # (c) S3 source -> copy (recursive if it looks like a prefix/dir)
-        recursive = " --recursive" if uri.endswith("/") else ""
-        lines.append(mkparent)
-        lines.append(
-            f'aws s3 cp {_q(uri)} {dest} --region "${{AWS_REGION}}"{recursive} --quiet '
-            f'|| {{ echo "miniwdl-spawn: failed to stage {stage_name}" >&2; exit 1; }}\n'
-        )
-    lines.append("\n")
-    return "".join(lines)
-
-
-def build_run_line(command_file: str, docker_image: str, run_options: str = "") -> str:
-    """Run the task command, bare or inside Docker, capturing stdout/stderr."""
-    if not docker_image.strip():
-        return f"bash {command_file} 1>.command.out 2>.command.err\n"
-    opts = (run_options.strip() + " ") if run_options.strip() else ""
-    return (
-        'docker run --rm -v "${LOCAL_DIR}":"${LOCAL_DIR}" -w "${LOCAL_DIR}" '
-        + opts
-        + f"{shlex.quote(docker_image.strip())} bash {command_file} "
-        "1>.command.out 2>.command.err\n"
-    )
+        if uri.startswith("s3://"):
+            rec = " --recursive" if uri.endswith("/") else ""
+            out.append(f'aws s3 cp {_q(uri)} {dest} --region "${{AWS_REGION}}"{rec} --quiet\n')
+    return "".join(out)
 
 
 def build_staging_script(
     *,
     workdir_s3: str,
     region: str,
-    command: str,
     docker_image: str = "",
-    inputs: Optional[Mapping[str, str]] = None,
-    mount_basenames: Optional[Mapping[str, str]] = None,
     run_options: str = "",
     setup: str = "",
 ) -> str:
-    """Assemble the full user-data staging script. Pure."""
+    """Assemble the full user-data staging script. Pure.
+
+    ``workdir_s3`` is the per-attempt prefix (…/<run_id>/try-N); the script reads
+    ``<prefix>/command`` + ``<prefix>/work`` and writes results back there.
+    """
     sb: list[str] = ["#!/bin/bash\n", "set -uo pipefail\n\n"]
     sb.append(f"WORKDIR_S3={_q(workdir_s3)}\n")
     sb.append(f"AWS_REGION={_q(region)}\n")
-    sb.append(f"LOCAL_DIR={LOCAL_DIR}\n\n")
-    sb.append('sudo mkdir -p "${LOCAL_DIR}" && sudo chown "$(id -u):$(id -g)" "${LOCAL_DIR}"\n')
-    sb.append('chmod 0777 "${LOCAL_DIR}"\n\n')
+    sb.append(f"CD={CONTAINER_DIR}\n\n")
+
+    # Recreate the miniwdl container tree on the EBS root (not tmpfs), writable by
+    # a non-root container user.
+    sb.append('sudo mkdir -p "${CD}/work"\n')
+    sb.append('sudo chown -R "$(id -u):$(id -g)" "${CD}"\n')
+    sb.append('chmod -R 0777 "${CD}"\n\n')
 
     if setup.strip():
         sb.append(setup.rstrip() + "\n\n")
 
-    # 1. Sync the task workdir down (command + miniwdl metadata), then cd in.
-    sb.append('aws s3 sync "${WORKDIR_S3}" "${LOCAL_DIR}/" --region "${AWS_REGION}" --quiet\n')
-    sb.append('cd "${LOCAL_DIR}"\n\n')
-
-    # 2. Localize declared inputs.
-    sb.append(build_input_staging(inputs or {}, mount_basenames))
-
-    # 3. Materialize + run the command; capture the real exit code.
-    sb.append("cat > .command.sh <<'MINIWDL_SPAWN_EOF'\n")
-    sb.append(command.rstrip("\n") + "\n")
-    sb.append("MINIWDL_SPAWN_EOF\n")
-    sb.append("chmod +x .command.sh\n")
-    sb.append(build_run_line(".command.sh", docker_image, run_options))
-    sb.append("TASK_RC=$?\n")
-    sb.append('echo "${TASK_RC}" > .exitcode\n\n')
-
-    # 4. Sync outputs back FIRST (excluding .exitcode), then upload .exitcode ALONE
-    #    so its appearance in S3 always trails the outputs.
+    # 1. Pull command + the whole work/ tree (inputs already inside it).
     sb.append(
-        'aws s3 sync "${LOCAL_DIR}/" "${WORKDIR_S3}" --region "${AWS_REGION}" '
-        '--exclude ".exitcode" --quiet\n'
+        'aws s3 cp "${WORKDIR_S3}/command" "${CD}/command" --region "${AWS_REGION}" --quiet '
+        '|| { echo "miniwdl-spawn: failed to fetch command" >&2; exit 1; }\n'
+    )
+    sb.append('aws s3 sync "${WORKDIR_S3}/work" "${CD}/work" --region "${AWS_REGION}" --quiet\n\n')
+
+    # 2. Pre-create stdout/stderr so the >> redirection + back-cp always have targets.
+    sb.append(': > "${CD}/stdout.txt"\n')
+    sb.append(': > "${CD}/stderr.txt"\n\n')
+
+    # 3. Run exactly like miniwdl's local backend; capture the real exit code.
+    sb.append(build_run_line(docker_image, run_options))
+    sb.append("TASK_RC=$?\n")
+    sb.append('echo "${TASK_RC}" > "${CD}/.exitcode"\n\n')
+
+    # 4. Push results back: work/ + stdout + stderr FIRST, .exitcode LAST.
+    sb.append('aws s3 sync "${CD}/work" "${WORKDIR_S3}/work" --region "${AWS_REGION}" --quiet\n')
+    sb.append(
+        'aws s3 cp "${CD}/stdout.txt" "${WORKDIR_S3}/stdout.txt" --region "${AWS_REGION}" --quiet\n'
     )
     sb.append(
-        'aws s3 cp .exitcode "${WORKDIR_S3%/}/.exitcode" --region "${AWS_REGION}" --quiet\n\n'
+        'aws s3 cp "${CD}/stderr.txt" "${WORKDIR_S3}/stderr.txt" --region "${AWS_REGION}" --quiet\n'
+    )
+    sb.append(
+        'aws s3 cp "${CD}/.exitcode" "${WORKDIR_S3}/.exitcode" --region "${AWS_REGION}" --quiet\n\n'
     )
 
     # 5. Signal completion so spored terminates the instance.
