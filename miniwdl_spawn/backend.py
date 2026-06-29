@@ -142,8 +142,12 @@ class SpawnContainer(TaskContainer):
         )
 
         # 3. Build the per-task staging script + launch.
+        docker_image = str(rv.get("docker", ""))
         script = staging.build_staging_script(
-            workdir_s3=s3_prefix, region=region, docker_image=str(rv.get("docker", ""))
+            workdir_s3=s3_prefix,
+            region=region,
+            docker_image=docker_image,
+            setup=staging.build_setup_script(docker_image),
         )
         spec = launch.LaunchSpec(
             name=name,

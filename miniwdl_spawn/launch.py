@@ -30,6 +30,10 @@ class LaunchSpec:
     fsx_mount_point: str = ""
     # EBS snapshot mounts, each "snap-...:/mount[:ro|rw]" (already formatted).
     attach_volumes: list[str] = field(default_factory=list)
+    # Service-level IAM policies for the instance role (spawn --iam-policy). The
+    # default spored role grants only spawn-internal buckets, so the task instance
+    # needs S3 access to read/write the SPAWN_WORKDIR_S3 bridge bucket.
+    iam_policy: list[str] = field(default_factory=lambda: ["s3:FullAccess"])
 
 
 def build_launch_argv(spec: LaunchSpec) -> list[str]:
@@ -58,6 +62,8 @@ def build_launch_argv(spec: LaunchSpec) -> list[str]:
         argv += ["--volume-size", str(spec.volume_size)]
     for v in spec.attach_volumes or []:
         argv += ["--attach-volume", v]
+    for p in spec.iam_policy or []:
+        argv += ["--iam-policy", p]
     if spec.az:
         argv += ["--az", spec.az]
     if spec.fsx_id:
@@ -70,12 +76,15 @@ def build_launch_argv(spec: LaunchSpec) -> list[str]:
 
 
 def build_cancel_argv(name: str, region: Optional[str]) -> list[str]:
-    """Build ``spawn cancel <name> --region <region>``.
+    """Build ``spawn terminate <name> --region <region> --yes``.
 
-    Always include --region (the nf-spawn #58 lesson: a region-less cancel can
-    silently fail and leak a billable instance).
+    `spawn terminate` is the single-instance teardown (by name or id); `spawn
+    cancel` is for parameter *sweeps*, not one instance. Always include --region
+    (the nf-spawn #58 lesson: a region-less teardown can silently leak a billable
+    instance) and --yes (non-interactive).
     """
-    argv = ["spawn", "cancel", name]
+    argv = ["spawn", "terminate", name]
     if region:
         argv += ["--region", region]
+    argv += ["--yes"]
     return argv

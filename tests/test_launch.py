@@ -16,6 +16,8 @@ def test_launch_argv_core_flags():
     assert "-y" in argv
     assert argv[argv.index("--instance-type") + 1] == "c7g.4xlarge"
     assert argv[argv.index("--ttl") + 1] == "2h"
+    # S3 access for the workdir bridge bucket (default spored role lacks it).
+    assert argv[argv.index("--iam-policy") + 1] == "s3:FullAccess"
 
 
 def test_launch_argv_optional_flags():
@@ -43,9 +45,10 @@ def test_launch_argv_omits_unset():
         assert absent not in argv
 
 
-def test_cancel_argv_always_includes_region():
-    # nf-spawn #58: a region-less cancel can silently leak a billable instance.
+def test_cancel_uses_terminate_not_sweep_cancel():
+    # `spawn cancel` is for sweeps; single-instance teardown is `spawn terminate`.
+    # Always region-scoped (#58 leak lesson) + --yes (non-interactive).
     assert build_cancel_argv("wdl-x", "eu-west-1") == [
-        "spawn", "cancel", "wdl-x", "--region", "eu-west-1"
+        "spawn", "terminate", "wdl-x", "--region", "eu-west-1", "--yes"
     ]
-    assert build_cancel_argv("wdl-x", None) == ["spawn", "cancel", "wdl-x"]
+    assert build_cancel_argv("wdl-x", None) == ["spawn", "terminate", "wdl-x", "--yes"]

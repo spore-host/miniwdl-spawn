@@ -3,9 +3,29 @@ import base64
 from miniwdl_spawn.staging import (
     CONTAINER_DIR,
     build_run_line,
+    build_setup_script,
     build_staging_script,
     normalize_s3_uri,
 )
+
+
+def test_setup_script_ensures_docker_only_when_image():
+    # No image -> no setup (bare task, no docker needed).
+    assert build_setup_script("") == ""
+    # Image -> idempotent docker-ensure (stock AL2023 has none).
+    s = build_setup_script("ubuntu:24.04")
+    assert "command -v docker" in s          # idempotent guard
+    assert "dnf install -y docker" in s
+    assert "systemctl enable --now docker" in s
+
+
+def test_staging_script_injects_setup_before_pulls():
+    script = build_staging_script(
+        workdir_s3="s3://b/p", region="us-east-1", docker_image="ubuntu:24.04",
+        setup=build_setup_script("ubuntu:24.04"),
+    )
+    # docker-ensure runs before the S3 command pull.
+    assert script.index("dnf install -y docker") < script.index('aws s3 cp "${WORKDIR_S3}/command"')
 
 
 def test_normalize_s3_uri_fixes_empty_authority():

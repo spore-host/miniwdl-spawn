@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `runtime` keys: `spawn_instance_type`, `spawn_spot`, `spawn_ttl`,
     `spawn_region`, `spawn_az`, `spawn_fsx`, `spawn_ami`. Config:
     `SPAWN_WORKDIR_S3` (required), `SPAWN_REGION`, `SPAWN_TTL`.
+  - Pre-run fixes for the real-AWS path: single-instance teardown uses
+    `spawn terminate <name> --yes` (not `spawn cancel`, which is for sweeps);
+    the task instance is launched with `--iam-policy s3:FullAccess` so it can
+    read/write the S3 bridge bucket; and a docker-ensure preamble installs
+    Docker on stock AL2023 when the task has a `runtime.docker` image.
   - Pure-function unit tests (launch argv, S3 transfer argv/keys, staging script,
     sizing, completion) + backend call-order test; no AWS. End-to-end on real AWS
     is validated separately (spore-host#395 Phase 4).

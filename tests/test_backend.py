@@ -72,7 +72,7 @@ def test_run_terminating_cancels_and_returns_130(tmp_path, monkeypatch):
     )
     rc = c._run(_logger(), lambda: True, "echo hi")  # terminating() True immediately
     assert rc == 130
-    assert any(a[:2] == ["spawn", "cancel"] for a in calls)
+    assert any(a[:2] == ["spawn", "terminate"] for a in calls)
 
 
 def test_resolve_instance_type_reads_miniwdl_runtime_keys(tmp_path, monkeypatch):

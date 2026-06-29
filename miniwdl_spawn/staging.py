@@ -64,6 +64,25 @@ def build_run_line(docker_image: str, run_options: str = "") -> str:
     )
 
 
+def build_setup_script(docker_image: str) -> str:
+    """Per-task bootstrap that runs before staging. Ensures Docker when the task
+    has a container image — stock AL2023 (the default spawn AMI) has none. Ported
+    from nf-spawn's buildSetupScript; idempotent (``command -v docker`` guard), so
+    a Docker-preinstalled AMI is a no-op. aws CLI + spored ship on AL2023 already.
+    """
+    if not docker_image.strip():
+        return ""
+    return (
+        "# miniwdl-spawn: ensure Docker (stock AL2023 has none); idempotent.\n"
+        "if ! command -v docker >/dev/null 2>&1; then\n"
+        '  echo "miniwdl-spawn: installing Docker..." >&2\n'
+        '  sudo dnf install -y docker || { echo "miniwdl-spawn: docker install failed" >&2; exit 1; }\n'
+        "fi\n"
+        "sudo systemctl enable --now docker 2>/dev/null || sudo systemctl start docker "
+        '|| { echo "miniwdl-spawn: could not start docker" >&2; exit 1; }\n'
+    )
+
+
 def build_input_staging(
     inputs: Mapping[str, str], mount_basenames: Optional[Mapping[str, str]] = None
 ) -> str:
