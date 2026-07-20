@@ -47,12 +47,16 @@ def build_run_command(container_dir: str) -> str:
     Both ``command`` and the ``work/`` tree are staged under ``container_dir`` by
     the input manifest, so ``../command`` resolves whether the task runs bare on
     the host or inside spawn's ``docker run`` (which identity-bind-mounts the
-    manifest dirs). We pre-create the redirect targets so the ``>>`` and the
-    output sync always have files to act on.
+    manifest dirs). We ``mkdir -p`` the work dir first — a task with no input
+    files has an empty local ``work/``, which ``aws s3 sync`` uploads as nothing,
+    so stage-in never recreates it on the instance; the command must not then fail
+    on ``cd``. We also pre-create the redirect targets so the ``>>`` and the output
+    sync always have files to act on.
     """
     cd = container_dir.rstrip("/")
     return (
-        f": > {shlex.quote(cd + '/stdout.txt')} "
+        f"mkdir -p {shlex.quote(cd + '/work')} "
+        f"&& : > {shlex.quote(cd + '/stdout.txt')} "
         f"&& : > {shlex.quote(cd + '/stderr.txt')} "
         f"&& cd {shlex.quote(cd + '/work')} "
         "&& /bin/bash ../command >> ../stdout.txt 2>> ../stderr.txt"

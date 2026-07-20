@@ -22,7 +22,9 @@ def test_command_runs_bash_command_from_work_dir():
     cmd = spec["command"]
     assert cmd[0] == "/bin/bash" and cmd[1] == "-lc"
     inner = cmd[2]
-    # pre-creates stdout/stderr, cd's into work/, runs ../command with redirects
+    # mkdir work/ (empty-input safety), pre-create stdout/stderr, cd into work/,
+    # run ../command with redirects
+    assert f"mkdir -p {CD}/work" in inner
     assert f"{CD}/work" in inner
     assert "/bin/bash ../command >> ../stdout.txt 2>> ../stderr.txt" in inner
     assert f"{CD}/stdout.txt" in inner and f"{CD}/stderr.txt" in inner
