@@ -30,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `truffle` is no longer required on `PATH` (spawn sizes the instance itself);
   `spawn` and `aws` are still required.
 
+### Fixed
+- Tasks with no input files no longer fail on the instance with a `cd: … work: No
+  such file or directory` error. An empty local `work/` uploads as nothing, so
+  stage-in never recreated it on the instance; the command now `mkdir -p work/`
+  before entering it. (Found by the real-AWS `examples/hello.wdl` smoke.)
+
 ### Removed
 - Bundled launch/staging/completion/sizing machinery (`launch.py`, `staging.py`,
   `completion.py`, `sizing.py`) — spawn owns these now.
