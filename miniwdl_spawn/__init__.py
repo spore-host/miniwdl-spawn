@@ -5,4 +5,4 @@ A miniwdl container backend (entry point ``miniwdl.plugin.container_backend`` =
 instance through the ``spawn`` CLI — the WDL analog of nf-spawn for Nextflow.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
