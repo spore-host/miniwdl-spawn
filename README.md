@@ -6,9 +6,8 @@ runs each WDL task on its own ephemeral EC2 instance via
 auto-terminated when the task completes. It is the WDL analog of
 [nf-spawn](https://github.com/spore-host/nf-spawn) for Nextflow.
 
-> Status: early (v0.1.0). The pure dispatch/staging/sizing/completion logic and
-> miniwdl backend wiring are implemented and unit-tested; end-to-end on real AWS
-> is being validated (spore-host#395).
+> Status: early. The dispatch logic and miniwdl backend wiring are implemented and
+> unit-tested; end-to-end on real AWS is validated (spore-host#395).
 
 ## How it works
 
@@ -16,25 +15,31 @@ auto-terminated when the task completes. It is the WDL analog of
 entry point. `miniwdl-spawn` registers one named **`spawn`**. For each WDL task,
 its `SpawnContainer._run()`:
 
-1. **Sizes** the instance from the task's `runtime { cpu, memory }` — picking the
-   cheapest fitting type via `truffle search --pick-first` (override with
-   `runtime.spawn_instance_type`). *(This is something nf-spawn can't do: Nextflow's
-   `ext.instanceType` is manual; WDL's runtime block is declarative.)*
-2. **Builds a staging script** (the instance's user-data): sync the task's S3
-   workdir down, localize inputs, run the command (in Docker when the task has a
-   `docker` image), capture the exit code, sync outputs back, and upload
-   `.exitcode` **last**.
-3. **Launches** via `spawn launch … --on-complete terminate --user-data-file …`
-   (non-blocking).
-4. **Polls** `s3://<workdir>/.exitcode` for completion — durable, so it survives
-   the instance self-terminating — and maps the code to task success/failure.
-5. **Cancels** (`spawn cancel`) if miniwdl aborts.
+1. **Stages** the task's `command` file + local `work/` tree (inputs included) up
+   to a per-attempt S3 prefix.
+2. **Builds a spawn TaskSpec** — the shared workflow-adapter contract (spawn#386):
+   the command runs exactly as miniwdl's local backend does
+   (`/bin/bash ../command >> ../stdout.txt 2>> ../stderr.txt`, cwd `work/`), the
+   task's `runtime { cpu, memory }` become the TaskSpec `resources` (spawn's sizer
+   picks the cheapest fit via truffle — something nf-spawn can't do, since
+   Nextflow's `ext.instanceType` is manual and WDL's runtime block is
+   declarative), and a `docker` image becomes the TaskSpec `container`.
+3. **Dispatches** `spawn task run` (detached). spawn sizes the instance, stages
+   the tree back down at `container_dir`, runs the command (installing Docker and
+   running the container on demand), writes a durable **completion record** to
+   `s3://spawn-results-<acct>-<region>/tasks/<id>/completion.json`, and the
+   instance self-terminates.
+4. **Polls** `spawn task status --check-complete` for completion (durable — it
+   survives the instance self-terminating), reads the exit code from the
+   completion record, then pulls `work/`+`stdout.txt`+`stderr.txt` back so miniwdl
+   collects outputs as usual.
+5. **Cancels** the instance (`spawn terminate`) if miniwdl aborts.
 
 ## Install
 
 ```bash
 pip install miniwdl-spawn          # installs miniwdl too
-# requires the `spawn` and `truffle` CLIs on PATH, and AWS credentials
+# requires the `spawn` CLI on PATH, and AWS credentials (spawn sizes via truffle itself)
 ```
 
 ## Use
@@ -51,14 +56,13 @@ miniwdl run gatk-germline.wdl -i inputs.json \
 
 | `runtime` key | Effect |
 |---|---|
-| `cpu`, `memory` | Auto-pick cheapest fitting instance (via truffle) |
+| `cpu`, `memory` | Auto-pick cheapest fitting instance (spawn sizes via truffle) |
 | `docker` | Run the task command inside this image |
-| `spawn_instance_type` | Force an exact instance type (skips auto-sizing) |
-| `spawn_spot` | Use Spot pricing |
+| `spawn_instance_type` | Steer the instance **family** (e.g. `c7i.4xlarge` → `c7i`); spawn picks the cheapest fit within it |
+| `spawn_spot` | Use Spot pricing (falls back to on-demand) |
 | `spawn_ttl` | Hard termination deadline (e.g. `"8h"`) |
-| `spawn_region`, `spawn_az` | Pin region / AZ |
-| `spawn_fsx` | Mount a shared FSx filesystem id (wide fan-out reference data) |
-| `spawn_ami` | Launch from a specific AMI |
+| `spawn_region` | Pin region |
+| `spawn_architecture` | Constrain CPU architecture (`x86_64` / `arm64`) |
 
 ## Configuration
 

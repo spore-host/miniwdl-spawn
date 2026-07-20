@@ -20,6 +20,7 @@ def _make_container(tmp_path, monkeypatch):
     (tmp_path / "work").mkdir()
     c.try_counter = 1
     c.input_path_map = {}
+    c.container_dir = backend.CONTAINER_DIR
     c.runtime_values = {"env": {}}
     c._workdir_s3_base = "s3://bkt/runs"
     c._region = "us-east-1"
@@ -29,21 +30,23 @@ def _make_container(tmp_path, monkeypatch):
     monkeypatch.setattr(c, "host_work_dir", lambda: str(tmp_path / "work"), raising=False)
     monkeypatch.setattr(c, "host_stdout_txt", lambda: str(tmp_path / "stdout.txt"), raising=False)
     monkeypatch.setattr(c, "host_stderr_txt", lambda: str(tmp_path / "stderr.txt"), raising=False)
-    monkeypatch.setattr(c, "_resolve_instance_type", lambda: "t3.medium", raising=False)
     return c
 
 
 def test_run_call_order_and_returns_exit_code(tmp_path, monkeypatch):
     c = _make_container(tmp_path, monkeypatch)
-    monkeypatch.setattr(backend.shutil, "which", lambda _: "/usr/bin/aws")
+    monkeypatch.setattr(backend.shutil, "which", lambda _: "/usr/bin/x")
 
     calls = []
 
     def fake_run(argv, check=False, capture_output=True, text=True):
         calls.append(argv)
-        # The .exitcode probe (aws s3 cp .../.exitcode -) returns "0" once.
-        if argv[:3] == ["aws", "s3", "cp"] and argv[3].endswith("/.exitcode") and argv[4] == "-":
-            return _Result(returncode=0, stdout="0\n")
+        # `spawn task status --check-complete` → 0 (completed) so the poll ends.
+        if argv[:3] == ["spawn", "task", "status"] and "--check-complete" in argv:
+            return _Result(returncode=0)
+        # `spawn task status -o json` → a CompletionRecord with exit_code 0.
+        if argv[:3] == ["spawn", "task", "status"] and "json" in argv:
+            return _Result(returncode=0, stdout='{"task_id":"t","exit_code":0,"state":"completed"}')
         return _Result(returncode=0, stdout="")
 
     monkeypatch.setattr(backend.subprocess, "run", fake_run)
@@ -52,19 +55,42 @@ def test_run_call_order_and_returns_exit_code(tmp_path, monkeypatch):
     assert rc == 0
 
     kinds = [_classify(a) for a in calls]
-    # command upload -> work upload -> launch -> probe -> downloads (work+stdout+stderr)
+    # command upload -> work upload -> task run -> status-probe -> downloads
     assert kinds.index("upload-command") < kinds.index("upload-work")
-    assert kinds.index("upload-work") < kinds.index("launch")
-    assert kinds.index("launch") < kinds.index("probe")
-    assert kinds.index("probe") < kinds.index("download-work")
+    assert kinds.index("upload-work") < kinds.index("task-run")
+    assert kinds.index("task-run") < kinds.index("status-probe")
+    assert kinds.index("status-probe") < kinds.index("download-work")
     assert "download-stdout" in kinds and "download-stderr" in kinds
     # command file was written locally
     assert (tmp_path / "command").read_text().strip() == "echo hi"
+    # dispatched DETACHED — no --wait on the task run call.
+    run_call = next(a for a in calls if _classify(a) == "task-run")
+    assert "--wait" not in run_call
+
+
+def test_run_failure_exit_code_still_pulls_results(tmp_path, monkeypatch):
+    c = _make_container(tmp_path, monkeypatch)
+    monkeypatch.setattr(backend.shutil, "which", lambda _: "/usr/bin/x")
+    calls = []
+
+    def fake_run(argv, check=False, capture_output=True, text=True):
+        calls.append(argv)
+        if argv[:3] == ["spawn", "task", "status"] and "--check-complete" in argv:
+            return _Result(returncode=1)  # failed
+        if argv[:3] == ["spawn", "task", "status"] and "json" in argv:
+            return _Result(returncode=1, stdout='{"task_id":"t","exit_code":42,"state":"failed"}')
+        return _Result(returncode=0, stdout="")
+
+    monkeypatch.setattr(backend.subprocess, "run", fake_run)
+    rc = c._run(_logger(), lambda: False, "false")
+    assert rc == 42
+    kinds = [_classify(a) for a in calls]
+    assert "download-work" in kinds  # results pulled even on failure
 
 
 def test_run_terminating_cancels_and_returns_130(tmp_path, monkeypatch):
     c = _make_container(tmp_path, monkeypatch)
-    monkeypatch.setattr(backend.shutil, "which", lambda _: "/usr/bin/aws")
+    monkeypatch.setattr(backend.shutil, "which", lambda _: "/usr/bin/x")
     calls = []
     monkeypatch.setattr(
         backend.subprocess, "run",
@@ -75,36 +101,27 @@ def test_run_terminating_cancels_and_returns_130(tmp_path, monkeypatch):
     assert any(a[:2] == ["spawn", "terminate"] for a in calls)
 
 
-def test_resolve_instance_type_reads_miniwdl_runtime_keys(tmp_path, monkeypatch):
-    # miniwdl stores runtime.cpu as "cpu" and runtime.memory as "memory_reservation"
-    # (bytes), NOT "memory". Guard against reading the wrong key (silent no-sizing).
-    c = backend.SpawnContainer.__new__(backend.SpawnContainer)
-    c.runtime_values = {"cpu": 8, "memory_reservation": 32 * 1024**3}
-    captured = {}
+def test_task_id_folds_in_try_counter(tmp_path, monkeypatch):
+    c = _make_container(tmp_path, monkeypatch)
+    c.try_counter = 3
+    monkeypatch.setattr(backend.shutil, "which", lambda _: "/usr/bin/x")
+    calls = []
 
-    def fake_pick(**kw):
-        captured.update(kw)
-        return "c7i.2xlarge"
+    def fake_run(argv, check=False, capture_output=True, text=True):
+        calls.append(argv)
+        if argv[:3] == ["spawn", "task", "status"] and "--check-complete" in argv:
+            return _Result(returncode=0)
+        if argv[:3] == ["spawn", "task", "status"] and "json" in argv:
+            return _Result(returncode=0, stdout='{"exit_code":0,"state":"completed"}')
+        return _Result(returncode=0, stdout="")
 
-    monkeypatch.setattr(backend.sizing, "pick_instance_type", fake_pick)
-    assert c._resolve_instance_type() == "c7i.2xlarge"
-    assert captured["cpu"] == 8
-    assert captured["memory"] == 32 * 1024**3  # passed through from memory_reservation
-
-
-def test_resolve_instance_type_override(tmp_path, monkeypatch):
-    c = backend.SpawnContainer.__new__(backend.SpawnContainer)
-    c.runtime_values = {"spawn_instance_type": "m7i.4xlarge", "cpu": 2}
-    captured = {}
-    monkeypatch.setattr(
-        backend.sizing, "pick_instance_type",
-        lambda **kw: captured.update(kw) or "m7i.4xlarge",
-    )
-    c._resolve_instance_type()
-    assert captured["override"] == "m7i.4xlarge"
+    monkeypatch.setattr(backend.subprocess, "run", fake_run)
+    c._run(_logger(), lambda: False, "echo hi")
+    status = next(a for a in calls if a[:3] == ["spawn", "task", "status"])
+    assert status[3] == "wdl-run-abc-3"  # run_id sanitized + try_counter
 
 
-def test_run_requires_workdir_and_aws(tmp_path, monkeypatch):
+def test_run_requires_workdir_and_clis(tmp_path, monkeypatch):
     c = _make_container(tmp_path, monkeypatch)
     c._workdir_s3_base = ""
     with pytest.raises(RuntimeError, match="no S3 workdir"):
@@ -124,15 +141,15 @@ def _logger():
 
 def _classify(argv):
     s = " ".join(argv)
-    if argv[:2] == ["spawn", "launch"]:
-        return "launch"
-    if argv[:2] == ["spawn", "cancel"]:
-        return "cancel"
-    # aws s3 cp/sync ...: arg index 2 is cp|sync, 3 is src, 4 is dst (or "-" for probe).
+    if argv[:3] == ["spawn", "task", "run"]:
+        return "task-run"
+    if argv[:3] == ["spawn", "task", "status"]:
+        return "status-probe"
+    if argv[:2] == ["spawn", "terminate"]:
+        return "terminate"
+    # aws s3 cp/sync ...: arg index 2 is cp|sync, 3 is src, 4 is dst.
     if argv[:2] == ["aws", "s3"]:
         op, src, dst = argv[2], argv[3], argv[4]
-        if dst == "-" and src.endswith("/.exitcode"):
-            return "probe"
         if op == "cp" and dst.endswith("/command"):
             return "upload-command"
         if op == "sync" and not src.startswith("s3://"):
