@@ -3,7 +3,8 @@ results back down (spore-host#395).
 
 miniwdl is local-filesystem based: before ``_run`` it lays out ``{host_dir}/work/``
 (with inputs under ``work/_miniwdl_inputs/...``) and the command string hard-codes
-container paths under ``/mnt/miniwdl_task_container``; after ``_run`` it reads
+container paths under the backend's ``container_dir`` (``/var/tmp/miniwdl_task_container``);
+after ``_run`` it reads
 ``{host_dir}/stdout.txt`` / ``stderr.txt`` and globs ``{host_dir}/work/`` locally.
 This module builds the (pure) S3 keys and ``aws s3`` argv that move those bytes
 between the local host_dir, S3, and the ephemeral instance. The thin subprocess
