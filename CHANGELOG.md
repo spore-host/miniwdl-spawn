@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Engine-composition CI test** (`tests/composition/`, `.github/workflows/composition-test.yml`):
+  runs **real `miniwdl run`** through the spawn backend against the
+  [Substrate](https://github.com/scttfrdmn/substrate) AWS emulator — no real AWS,
+  no cost. Exercises the full seam (miniwdl → SpawnContainer → real `spawn task
+  run` + real `aws s3` staging vs. Substrate → completion record → exit code →
+  task success/failure), asserting both the happy path (unseeded ⇒ nominal
+  success) and the failure path (a seeded nonzero completion, via
+  substrate#360's `POST /v1/spawn/task-completion`, ⇒ miniwdl `CommandFailed`).
+  A permanent regression guard that the adapter still composes with current
+  miniwdl + spawn.
+
 ## [0.2.0] - 2026-07-19
 
 ### Changed
