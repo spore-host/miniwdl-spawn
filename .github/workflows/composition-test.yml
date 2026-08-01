@@ -14,7 +14,12 @@ on:
   workflow_dispatch:
 
 env:
-  SUBSTRATE_VERSION: v0.75.0   # first release with seedable task-completion (#360)
+  # v0.75.0 was the first release with seedable task-completion (substrate#360);
+  # v0.81.0 keeps that contract byte-identical (verified: POST/DELETE
+  # /v1/spawn/task-completion with the same snake_case payload) and adds the S3 and
+  # error-code fidelity fixes this test's staging step exercises (substrate#391,
+  # #392, #396, #398, #399, #406).
+  SUBSTRATE_VERSION: v0.81.0
   SPAWN_VERSION: 0.95.0        # spawn release providing `spawn task run`
 
 jobs:
