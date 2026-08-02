@@ -15,11 +15,16 @@ on:
 
 env:
   # v0.75.0 was the first release with seedable task-completion (substrate#360);
-  # v0.81.0 keeps that contract byte-identical (verified: POST/DELETE
-  # /v1/spawn/task-completion with the same snake_case payload) and adds the S3 and
-  # error-code fidelity fixes this test's staging step exercises (substrate#391,
-  # #392, #396, #398, #399, #406).
-  SUBSTRATE_VERSION: v0.81.0
+  # v0.85.0 keeps that contract byte-identical (verified locally: POST/DELETE
+  # /v1/spawn/task-completion with the same snake_case payload, and both TESTs
+  # below pass unchanged) and adds the S3 and error-code fidelity fixes this
+  # test's staging step exercises (substrate#391, #392, #396, #398, #399, #406).
+  # v0.85.0 specifically fixes substrate#457 — HeadObject now resolves a
+  # synthesized completion, so HEAD and GET agree. This test doesn't depend on
+  # that (spawn's fetchCompletion calls GetObject directly), but `aws s3 cp` on a
+  # completion record only works from v0.85.0 on, so don't reach for it below a
+  # pin that has it.
+  SUBSTRATE_VERSION: v0.85.0
   SPAWN_VERSION: 0.95.0        # spawn release providing `spawn task run`
 
 jobs:
