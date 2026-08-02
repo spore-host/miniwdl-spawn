@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`ruff check .` went red in CI with no change on our side, and `ruff` is now
+  capped `<0.16`.** ruff 0.16 moved a large set of opinionated rules (`BLE`,
+  `PLW`, `TRY`, `C408`, `EXE`, `B017`, `UP035`, …) into its **default** rule set,
+  and the dev extra asked only for `ruff>=0.5` — so CI adopted 21 new violations
+  the moment ruff published, in code that hadn't been touched. Same cap as
+  `airflow-spawn` and `snakemake-executor-plugin-spawn`, which this release
+  brings the third adapter in line with. Adopting those rules should be a
+  deliberate change via an explicit `[tool.ruff.lint] select`, not something a
+  ruff release does to us.
+
 ### Added
 - **Engine-composition CI test** (`tests/composition/`, `.github/workflows/composition-test.yml`):
   runs **real `miniwdl run`** through the spawn backend against the

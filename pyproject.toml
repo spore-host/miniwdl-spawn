@@ -16,7 +16,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "ruff>=0.5", "mypy>=1.8"]
+# ruff is capped below 0.16: that release moved a large set of opinionated rules
+# (BLE, PLW, TRY, C408, EXE, B017, UP035, …) into the DEFAULT rule set, so an
+# unpinned `ruff check .` silently changes what CI enforces whenever ruff
+# publishes — the lint here went red with no code change on our side. Same cap as
+# airflow-spawn and snakemake-executor-plugin-spawn. Raising it is a deliberate
+# change: pick the rules to adopt via an explicit `[tool.ruff.lint] select`,
+# don't inherit them.
+dev = ["pytest>=7", "ruff>=0.5,<0.16", "mypy>=1.8"]
 
 [project.urls]
 Homepage = "https://github.com/spore-host/miniwdl-spawn"
