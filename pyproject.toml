@@ -23,7 +23,11 @@ dependencies = [
 # airflow-spawn and snakemake-executor-plugin-spawn. Raising it is a deliberate
 # change: pick the rules to adopt via an explicit `[tool.ruff.lint] select`,
 # don't inherit them.
-dev = ["pytest>=7", "ruff>=0.5,<0.16", "mypy>=1.8"]
+# `pyyaml` is a test-only dependency: tests/test_ci_hygiene.py parses
+# .github/dependabot.yml. It is imported unguarded there on purpose — a
+# try/except import degrades to a skip, and a skipped wiring test reports green
+# while asserting nothing.
+dev = ["pytest>=7", "ruff>=0.5,<0.16", "mypy>=1.8", "pyyaml>=6"]
 
 [project.urls]
 Homepage = "https://github.com/spore-host/miniwdl-spawn"

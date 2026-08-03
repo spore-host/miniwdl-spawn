@@ -1,0 +1,73 @@
+# Dependabot configuration for miniwdl-spawn.
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# Why this file exists: the actions in .github/workflows are pinned to commit SHAs
+# (#6), which closes the mutable-tag hole but opens a staleness one — a SHA never
+# moves, including past a security fix, and unlike `@v5` nothing updates it.
+# Pinning is only safe when something bumps the pins. That something is this file.
+#
+# The exposure here is narrower than the suite's npm/PyPI publishers: the
+# composition test runs against the Substrate AWS emulator, with no real
+# credentials and no instances.
+
+version: 2
+updates:
+  # GitHub Actions. Dependabot understands SHA pins: it rewrites both the SHA and
+  # the trailing `# vX.Y.Z` comment, so the pins stay readable and reviewable.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Los_Angeles"
+    # Don't propose a release the day it ships; let it sit a week first. A fresh
+    # action tag is exactly when a compromised or broken one is still unnoticed.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "deps(actions)"
+      include: "scope"
+    # No `reviewers:` key on purpose — it's deprecated and inert. Every one of the
+    # umbrella repo's Dependabot PRs asks for a reviewer and none has ever had a
+    # review request. Use CODEOWNERS if you want one.
+    groups:
+      # One PR for all of them. The pattern is "*", not "actions/*", because
+      # softprops/action-gh-release (which creates the GitHub Release, with
+      # `contents: write`) is not under actions/ — with "actions/*" it would fall
+      # outside the group, which is how updates get quietly ignored.
+      github-actions:
+        patterns:
+          - "*"
+
+  # Python dependencies from pyproject.toml.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Los_Angeles"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # ruff 0.16 moved a large set of opinionated rules into the DEFAULT rule set,
+      # so a bump reddens `ruff check .` with no code change. The `<0.16` cap in
+      # pyproject.toml is deliberate; lift the ceiling and this ignore together,
+      # after choosing which new rules to adopt via an explicit select.
+      - dependency-name: "ruff"
+        versions: [">=0.16"]
