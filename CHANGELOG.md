@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Pinned the 8 remaining floating action tags to commit SHAs, and added
+  Dependabot to bump every pin** ([#6](https://github.com/spore-host/miniwdl-spawn/issues/6)). A tag is mutable — `@v5` means
+  "whatever `v5` points at when the job runs" — and `actions/checkout@v6` genuinely
+  moved (`df4cb1c` → `d23441a`) with no signal to consumers, so this is not
+  hypothetical. Its `composition-test.yml` also lagged the other two workflows at `checkout@v4` while they had moved to `v7`. Pinning and Dependabot are one control, not two: a SHA never
+  moves on its own, including past a security fix.
+  - The new `.github/dependabot.yml` covers `github-actions` and `pip`, weekly with
+    a 7-day cooldown — a freshly published tag is exactly when a compromised or
+    broken one is still unnoticed. Group pattern is `*`, not `actions/*`, because
+    `softprops/action-gh-release` (which creates the GitHub Release under
+    `contents: write`) would otherwise fall outside the group and stop being
+    bumped. `ruff >=0.16` is ignored so a bump can't undo the deliberate cap.
+  - `tests/test_ci_hygiene.py` makes both halves regressions rather than
+    conventions: reverting a pin or dropping the Dependabot entry now fails
+    `pytest`, which CI already runs. `pyyaml` joins the `[dev]` extra for it and is
+    imported unguarded — a `try`/`except` import degrades to a skip, and a skipped
+    wiring test reports green while asserting nothing.
+  No behaviour change — CI wiring and tests only.
+
 ### Fixed
 - **`ruff check .` went red in CI with no change on our side, and `ruff` is now
   capped `<0.16`.** ruff 0.16 moved a large set of opinionated rules (`BLE`,
