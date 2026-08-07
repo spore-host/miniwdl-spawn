@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- CI moved off the self-hosted orion runner fleet onto `ubuntu-latest`. The
+  fleet (colima/Docker on orion.local) is being decommissioned org-wide; no
+  behavior change to the tool.
+
 ### Fixed
 - **A pin's version comment can no longer silently misstate what CI runs.**
   `tests/test_ci_hygiene.py` required only that *some* `# vN` comment be present,
