@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- CI workflow to publish `miniwdl-spawn` to PyPI on a `python-vX.Y.Z` tag, via
+  PyPI Trusted Publishing (OIDC, no stored API token) in a dedicated `pypi`
+  GitHub environment — the same mechanism `python-sdk` already uses. The
+  existing `vX.Y.Z`-triggered `release.yml` (GitHub Release only) is
+  unchanged; a PyPI publish is now a separate, deliberate tag.
+
 ### Changed
 - CI moved off the self-hosted orion runner fleet onto `ubuntu-latest`. The
   fleet (colima/Docker on orion.local) is being decommissioned org-wide; no
