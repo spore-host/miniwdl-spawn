@@ -103,6 +103,25 @@ def clean_env(environment: Optional[Mapping[str, str]]) -> dict:
     return {k: str(v) for k, v in environment.items() if _ENV_KEY_RE.match(k)}
 
 
+def _lifecycle(ttl: str, on_complete: str, cost_limit: Optional[float]) -> dict:
+    """The lifecycle block, with cost_limit included only when set (#12).
+
+    TTL bounds a task in TIME, not money, and spored enforces the two
+    INDEPENDENTLY — first limit to fire wins — so a cost cap is a genuine second
+    belt rather than a refinement of the first. Without it the only ceiling is the
+    TTL, defaulting to 4h, so a workflow fanning out N tasks has a worst case of
+    N x 4h x the instance rate.
+
+    The failure it actually catches is a task that HANGS rather than fails: it
+    produces no error for miniwdl to retry or abort on, so it bills until the TTL
+    expires. Omitted when unset so spawn's own default still applies.
+    """
+    lifecycle: dict = {"ttl": ttl, "on_complete": on_complete}
+    if cost_limit is not None and float(cost_limit) > 0:
+        lifecycle["cost_limit"] = float(cost_limit)
+    return lifecycle
+
+
 def build_task_spec(
     *,
     task_id: str,
@@ -116,6 +135,7 @@ def build_task_spec(
     spot: bool = False,
     ttl: str = "4h",
     on_complete: str = "terminate",
+    cost_limit: Optional[float] = None,
 ) -> dict:
     """Build the TaskSpec dict for one WDL task. Pure.
 
@@ -157,7 +177,7 @@ def build_task_spec(
         "inputs": [{"source": work_src, "destination": cd}],
         # Sync the reconstructed tree back so miniwdl collects work/ + stdout/stderr.
         "outputs": [{"source": cd + "/", "destination": work_src}],
-        "lifecycle": {"ttl": ttl, "on_complete": on_complete},
+        "lifecycle": _lifecycle(ttl, on_complete, cost_limit),
     }
     if docker_image.strip():
         spec["container"] = docker_image.strip()

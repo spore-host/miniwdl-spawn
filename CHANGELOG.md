@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A per-task spend cap: `lifecycle.cost_limit`** (#12). TTL was the only ceiling on a
+  task, defaulting to 4h, so a workflow fanning out N tasks had a worst case of
+  N × 4h × the instance rate with no second belt. `spored` enforces TTL and cost
+  **independently** — first limit to fire wins — so this is a genuine second limit, not a
+  refinement of the first.
+  The failure it actually catches is a task that **hangs** rather than fails: it produces
+  no error for miniwdl to retry or abort on, so it bills until the TTL expires.
+  Configure it workflow-wide as `[spawn] cost_limit` in `miniwdl.cfg` or via
+  `SPAWN_COST_LIMIT`, or per task with `runtime { spawn_cost_limit: 0.05 }`, which wins —
+  mirroring how `spawn_ttl` already works. Emitted only when set, so omitting it leaves
+  spawn's own default behaviour unchanged.
+  An unparseable value degrades to "bounded by TTL only" with a warning rather than
+  failing the run, because a typo in a config file shouldn't take down a workflow.
+  (`--cost-limit` became a compute **+ storage** total in spawn 0.116.0, so a cap now
+  bounds EBS too.)
+
+### Added
 - CI workflow to publish `miniwdl-spawn` to PyPI on a `python-vX.Y.Z` tag, via
   PyPI Trusted Publishing (OIDC, no stored API token) in a dedicated `pypi`
   GitHub environment — the same mechanism `python-sdk` already uses. The
