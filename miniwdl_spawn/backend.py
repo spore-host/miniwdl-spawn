@@ -52,6 +52,9 @@ class SpawnContainer(TaskContainer):
     # ---- class-level config (read once) ----------------------------------
     _region: str = "us-east-1"
     _ttl: str = "4h"
+    # Per-task spend cap in USD. None = no cap beyond the TTL, which is spawn's
+    # own default behaviour (#12).
+    _cost_limit: "Optional[float]" = None
     _workdir_s3_base: str = ""  # e.g. s3://my-bucket/miniwdl-runs ; required for real runs
     _poll_interval: float = 15.0
 
@@ -75,6 +78,9 @@ class SpawnContainer(TaskContainer):
 
         cls._region = os.environ.get("SPAWN_REGION") or _get("spawn", "region", cls._region)
         cls._ttl = os.environ.get("SPAWN_TTL") or _get("spawn", "ttl", cls._ttl)
+        cls._cost_limit = _parse_cost_limit(
+            os.environ.get("SPAWN_COST_LIMIT") or _get("spawn", "cost_limit", "")
+        )
         cls._workdir_s3_base = os.environ.get("SPAWN_WORKDIR_S3") or _get(
             "spawn", "workdir_s3", cls._workdir_s3_base
         )
@@ -102,6 +108,7 @@ class SpawnContainer(TaskContainer):
         for key in (
             "spawn_instance_type",
             "spawn_ttl",
+            "spawn_cost_limit",
             "spawn_region",
             "spawn_architecture",
         ):
@@ -173,6 +180,9 @@ class SpawnContainer(TaskContainer):
             spot=bool(rv.get("spawn_spot", False)),
             ttl=str(rv.get("spawn_ttl") or self._ttl),
             on_complete="terminate",
+            # A task's own runtime { spawn_cost_limit: 0.05 } wins over the
+            # workflow-wide config, mirroring spawn_ttl.
+            cost_limit=_parse_cost_limit(rv.get("spawn_cost_limit")) or self._cost_limit,
         )
         with tempfile.NamedTemporaryFile(
             "w", suffix=".json", prefix=f"miniwdl-spawn-{task_id}-", delete=False
@@ -253,3 +263,22 @@ class SpawnContainer(TaskContainer):
             )
         except Exception as e:  # best-effort
             logger.warning("miniwdl-spawn: cancel of %s failed: %s", task_id, e)
+
+
+def _parse_cost_limit(raw: object) -> "Optional[float]":
+    """Coerce a cost limit from config/env/runtime, or None.
+
+    Values arrive as strings from the environment and from miniwdl's config, so a
+    bad one must not take down a workflow: an unparseable cap degrades to "bounded
+    by TTL only" with a warning rather than raising (#12).
+    """
+    if raw is None or raw == "":
+        return None
+    try:
+        v = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        logging.getLogger("miniwdl-spawn").warning(
+            "ignoring non-numeric spawn cost limit %r; tasks will be bounded by TTL only", raw
+        )
+        return None
+    return v if v > 0 else None
